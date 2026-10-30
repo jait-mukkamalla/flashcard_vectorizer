@@ -105,5 +105,21 @@ real model).
   Use keyword mode if you want an empty result instead.
 - Sessions built from a graph cluster arrive with the knowledge graph (milestone 3); sessions are
   built from queries and decks for now.
+- A session draws from at most the top ~200 search hits and holds at most 100 cards, so very broad
+  queries are truncated to the best matches.
+- Grading is self-reported: you choose Again/Hard/Good/Easy. Suggested grades from answer checking
+  arrive in milestone 5.
+- Anki history is replayed assuming four answer buttons everywhere. Collections last scheduled with
+  Anki's long-removed v1 scheduler (three buttons while learning) may be seeded slightly off.
+- FSRS fuzzing is disabled so replays are deterministic; due dates are therefore not spread out
+  the way Anki spreads them.
+- Re-importing never deletes: cards or reviews removed from a deck in Anki stay in the library.
+- Memory is close to the budget at 100k cards (about 746 MB of 800 MB in the benchmark). The
+  `index_dtype = "float16"` option halves the vector matrix if you need headroom.
+- Importing a large review history takes time: replaying reviews runs at about 5,000 per second
+  (1M reviews is roughly 3 minutes), inside the background import.
+- Benchmark figures at 100k cards use random stand-in vectors (query embedding and embedding
+  throughput are measured with the real model), and were taken on one machine, not on dedicated
+  4-core / 8 GB hardware.
 - Only `.apkg`; CSV/TSV and Quizlet imports are later additions.
 - The UI is a single static page. The React/TypeScript frontend arrives with the graph view (milestone 3).

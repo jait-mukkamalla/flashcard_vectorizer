@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flashcard Vectorizer</title>
+<style>
+  :root {
+    --bg: #fafaf8; --panel: #ffffff; --text: #1d1d1b; --muted: #6b6b66; --line: #e3e2dc;
+    --accent: #2d5be3; --accent-soft: #e8eefc; --ok: #1f8a4c; --warn: #b26a00; --bad: #c0392b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #151514; --panel: #1e1e1c; --text: #ecebe6; --muted: #9a9992; --line: #33322e;
+      --accent: #7c9cff; --accent-soft: #242b45; --ok: #5cc98a; --warn: #e0a24a; --bad: #ee7b6e;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 860px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 20px; margin: 0 0 16px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin-bottom: 14px; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  input[type=search] { flex: 1 1 260px; padding: 10px 12px; font-size: 16px; border: 1px solid var(--line);
+         border-radius: 8px; background: var(--bg); color: var(--text); }
+  select, button { padding: 9px 12px; font-size: 14px; border-radius: 8px; border: 1px solid var(--line);
+         background: var(--panel); color: var(--text); cursor: pointer; }
+  button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .muted { color: var(--muted); font-size: 13px; }
+  .bar { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; margin-top: 8px; }
+  .bar > i { display: block; height: 100%; background: var(--accent); width: 0; transition: width .3s; }
+  .decks { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+  .decks label { border: 1px solid var(--line); border-radius: 999px; padding: 2px 10px; font-size: 13px; cursor: pointer; }
+  .decks label:has(input:checked) { background: var(--accent-soft); border-color: var(--accent); }
+  .decks input { display: none; }
+  .card { border-top: 1px solid var(--line); padding: 12px 0; }
+  .card:first-child { border-top: 0; }
+  .q { font-weight: 600; white-space: pre-wrap; }
+  .a { white-space: pre-wrap; margin-top: 4px; color: var(--muted); }
+  .meta { font-size: 12px; color: var(--muted); margin-top: 6px; display: flex; gap: 10px; flex-wrap: wrap; }
+  .tag { background: var(--accent-soft); border-radius: 4px; padding: 0 6px; }
+  .err { color: var(--bad); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Flashcard Vectorizer</h1>
+
+  <div class="panel">
+    <div class="row">
+      <button class="primary" id="importBtn">Import .apkg</button>
+      <input type="file" id="file" accept=".apkg" hidden multiple>
+      <span class="muted" id="status">Loading…</span>
+    </div>
+    <div class="bar" id="barWrap" hidden><i id="bar"></i></div>
+    <div class="muted err" id="error" hidden></div>
+  </div>
+
+  <div class="panel">
+    <form class="row" id="form">
+      <input type="search" id="q" placeholder="Search your cards…" autofocus autocomplete="off">
+      <select id="mode" title="Search mode">
+        <option value="hybrid">Hybrid</option>
+        <option value="dense">Semantic</option>
+        <option value="keyword">Keyword</option>
+      </select>
+      <button class="primary" type="submit">Search</button>
+    </form>
+    <div class="decks" id="decks"></div>
+  </div>
+
+  <div class="panel" id="resultsPanel" hidden>
+    <div class="muted" id="summary"></div>
+    <div id="results"></div>
+  </div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+let busy = false, lastJobKey = '';
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+  return r.json();
+}
+
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
+async function refreshStatus() {
+  try {
+    const s = await api('/api/status');
+    const j = s.job, parts = [`${s.cards.toLocaleString()} cards in ${s.decks} deck${s.decks === 1 ? '' : 's'}`];
+    let pct = null;
+    if (j.phase === 'importing') parts.push(`importing ${j.import.file}… ${j.import.cards.toLocaleString()} cards`);
+    else if (j.phase === 'embedding' || (s.pending > 0 && j.phase === 'queued')) {
+      pct = s.cards ? (s.embedded / s.cards) * 100 : 0;
+      parts.push(`embedding ${s.embedded.toLocaleString()} / ${s.cards.toLocaleString()} (keyword search already works)`);
+    } else if (s.pending > 0) parts.push(`${s.pending.toLocaleString()} cards not yet embedded`);
+    else if (s.cards) parts.push('all embedded');
+    $('status').textContent = parts.join(' · ');
+    $('barWrap').hidden = pct === null;
+    if (pct !== null) $('bar').style.width = pct + '%';
+    $('error').hidden = !j.error;
+    $('error').textContent = j.error || '';
+    const key = s.cards + ':' + s.decks;
+    if (key !== lastJobKey) { lastJobKey = key; refreshDecks(); }
+    setTimeout(refreshStatus, ['importing', 'embedding', 'queued'].includes(j.phase) ? 1000 : 4000);
+  } catch (e) {
+    $('status').textContent = 'Server unreachable';
+    setTimeout(refreshStatus, 4000);
+  }
+}
+
+async function refreshDecks() {
+  const checked = new Set([...document.querySelectorAll('#decks input:checked')].map(i => i.value));
+  const box = $('decks');
+  box.replaceChildren();
+  for (const d of await api('/api/decks')) {
+    const label = el('label'), input = el('input');
+    input.type = 'checkbox'; input.value = d.id; input.checked = checked.has(String(d.id));
+    label.append(input, `${d.name} (${d.cards.toLocaleString()})`);
+    box.append(label);
+  }
+}
+
+$('importBtn').onclick = () => $('file').click();
+$('file').onchange = async e => {
+  for (const f of e.target.files) {
+    const body = new FormData(); body.append('file', f);
+    try { await api('/api/import', { method: 'POST', body }); }
+    catch (err) { $('error').hidden = false; $('error').textContent = `${f.name}: ${err.message}`; }
+  }
+  e.target.value = '';
+  refreshStatus();
+};
+
+$('form').onsubmit = async e => {
+  e.preventDefault();
+  const q = $('q').value.trim();
+  if (!q) return;
+  const params = new URLSearchParams({ q, mode: $('mode').value, limit: 30 });
+  document.querySelectorAll('#decks input:checked').forEach(i => params.append('deck', i.value));
+  try {
+    const r = await api('/api/search?' + params);
+    render(r);
+  } catch (err) {
+    $('resultsPanel').hidden = false;
+    $('summary').textContent = 'Search failed: ' + err.message;
+    $('results').replaceChildren();
+  }
+};
+
+function render(r) {
+  $('resultsPanel').hidden = false;
+  const t = r.timings, note = (r.mode !== 'keyword' && !r.dense_ready) ? ' · no vectors yet, showing keyword matches only' : '';
+  $('summary').textContent = `${r.results.length} results in ${t.total_ms.toFixed(0)} ms` +
+    (t.embed_ms !== undefined ? ` (embed ${t.embed_ms.toFixed(0)}, vector ${t.dense_ms.toFixed(0)}` +
+      (t.keyword_ms !== undefined ? `, keyword ${t.keyword_ms.toFixed(0)}` : '') + ')' : '') + note;
+  const out = $('results');
+  out.replaceChildren();
+  for (const c of r.results) {
+    const card = el('div', 'card');
+    card.append(el('div', 'q', c.question), el('div', 'a', c.answer));
+    const meta = el('div', 'meta');
+    meta.append(el('span', '', c.deck));
+    if (c.dense_score != null) meta.append(el('span', '', `similarity ${c.dense_score.toFixed(3)}`));
+    if (c.keyword_rank != null) meta.append(el('span', '', `keyword #${c.keyword_rank}`));
+    for (const tag of c.tags.split(' ').filter(Boolean)) meta.append(el('span', 'tag', tag));
+    card.append(meta);
+    out.append(card);
+  }
+}
+
+refreshStatus();
+</script>
+</body>
+</html>

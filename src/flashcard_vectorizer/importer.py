@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable
 
+from . import scheduling
 from .apkg import ParsedCard, iter_apkg
 
 COMMIT_EVERY = 2000
@@ -19,6 +20,7 @@ class ImportResult:
     updated: int = 0  # text changed, so it will be re-embedded
     refreshed: int = 0  # only tags/markup changed; vectors stay valid
     unchanged: int = 0
+    reviews: int = 0  # review-history entries newly stored (already-known ones are skipped)
     decks: set[str] = field(default_factory=set)
 
     @property
@@ -42,11 +44,24 @@ def import_cards(
     conn: sqlite3.Connection,
     cards: Iterable[ParsedCard],
     progress: Callable[[int], None] | None = None,
+    retention: float = 0.9,
 ) -> ImportResult:
-    """Add or update cards. Only new or text-changed cards will need embedding afterwards."""
+    """Add or update cards. Only new or text-changed cards will need embedding afterwards.
+
+    Review history is stored for every card (even unchanged ones, so a library imported before
+    history support is backfilled) and FSRS state is rebuilt for cards that gained reviews.
+    """
     result = ImportResult()
     decks: dict[str, int] = {}
     pending = 0
+    reviewed: set[int] = set()  # cards that gained reviews since the last commit
+
+    def flush() -> None:
+        if reviewed:
+            scheduling.rebuild(conn, sorted(reviewed), retention)
+            reviewed.clear()
+        conn.commit()
+
     for c in cards:
         deck_id = _deck_id(conn, decks, c.deck)
         result.decks.add(c.deck)
@@ -68,10 +83,12 @@ def import_cards(
                 "INSERT INTO cards_fts(rowid, question, answer, tags) VALUES (?,?,?,?)",
                 (cur.lastrowid, c.question, c.answer, c.tags),
             )
+            card_id = cur.lastrowid
             result.added += 1
         elif (row["content_hash"], row["tags"], row["question_html"], row["answer_html"]) == (
             h, c.tags, c.question_html, c.answer_html
         ):
+            card_id = row["id"]
             result.unchanged += 1
         else:
             conn.execute(
@@ -84,23 +101,35 @@ def import_cards(
                 "INSERT INTO cards_fts(rowid, question, answer, tags) VALUES (?,?,?,?)",
                 (row["id"], c.question, c.answer, c.tags),
             )
+            card_id = row["id"]
             if row["content_hash"] != h:
                 result.updated += 1
             else:
                 result.refreshed += 1
+        if c.reviews:
+            stored = conn.executemany(
+                "INSERT OR IGNORE INTO reviews(card_id, ts, rating, duration_ms, source) VALUES (?,?,?,?,'anki')",
+                [(card_id, r.ts, r.rating, r.duration_ms) for r in c.reviews],
+            ).rowcount
+            if stored > 0:
+                result.reviews += stored
+                reviewed.add(card_id)
         pending += 1
         if pending >= COMMIT_EVERY:
-            conn.commit()
+            flush()
             pending = 0
             if progress:
                 progress(result.total)
-    conn.commit()
+    flush()
     if progress:
         progress(result.total)
     return result
 
 
 def import_apkg(
-    conn: sqlite3.Connection, path: str | Path, progress: Callable[[int], None] | None = None
+    conn: sqlite3.Connection,
+    path: str | Path,
+    progress: Callable[[int], None] | None = None,
+    retention: float = 0.9,
 ) -> ImportResult:
-    return import_cards(conn, iter_apkg(path), progress)
+    return import_cards(conn, iter_apkg(path), progress, retention)

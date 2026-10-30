@@ -38,10 +38,11 @@ def cmd_import(lib: Library, args) -> int:
     from .importer import import_apkg
 
     for path in args.files:
-        result = import_apkg(lib.conn(), path, _progress(f"importing {path}"))
+        result = import_apkg(lib.conn(), path, _progress(f"importing {path}"), lib.cfg.desired_retention)
         print(
             f"\n{path}: {result.added} added, {result.updated} changed, "
-            f"{result.unchanged + result.refreshed} unchanged ({len(result.decks)} decks)"
+            f"{result.unchanged + result.refreshed} unchanged ({len(result.decks)} decks), "
+            f"{result.reviews} reviews"
         )
     if not args.no_embed:
         return cmd_embed(lib, args)

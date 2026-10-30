@@ -12,9 +12,30 @@ from urllib.parse import urlsplit
 
 from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
+from pydantic import BaseModel, Field
 
 from .config import Config, load_config
 from .library import Library
+
+
+class SessionRequest(BaseModel):
+    query: str | None = None
+    mode: str = "hybrid"
+    decks: list[int] | None = None
+    size: int = Field(20, ge=1, le=100)
+    scope: str = "all"
+    title: str | None = None
+
+
+class AnswerRequest(BaseModel):
+    card_id: int
+    rating: int = Field(ge=1, le=4)
+    duration_ms: int = 0
+
+
+class SettingsRequest(BaseModel):
+    fsrs: bool
+
 
 STATIC = Path(__file__).parent / "static"
 LOOPBACK = {"127.0.0.1", "localhost", "::1"}
@@ -100,6 +121,48 @@ def create_app(cfg: Config | None = None, library: Library | None = None, warm: 
         if row is None:
             raise HTTPException(404, "no such card")
         return dict(row)
+
+    @app.get("/api/settings")
+    def get_settings():
+        return lib.study.settings()
+
+    @app.put("/api/settings")
+    def put_settings(body: SettingsRequest):
+        lib.study.set_fsrs(body.fsrs)
+        return lib.study.settings()
+
+    # Study sessions. ValueError -> 400 (bad request), LookupError -> 404.
+    def guarded(fn, *args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+        except LookupError as e:
+            raise HTTPException(404, str(e)) from e
+
+    @app.post("/api/sessions", status_code=201)
+    def create_session(body: SessionRequest):
+        return guarded(lib.study.create_session, **body.model_dump())
+
+    @app.get("/api/sessions")
+    def list_sessions():
+        return lib.study.list_sessions()
+
+    @app.get("/api/sessions/{sid}")
+    def get_session(sid: int):
+        return guarded(lib.study.get_session, sid)
+
+    @app.get("/api/sessions/{sid}/next")
+    def next_card(sid: int):
+        return guarded(lib.study.next_card, sid)
+
+    @app.post("/api/sessions/{sid}/answer")
+    def answer(sid: int, body: AnswerRequest):
+        return guarded(lib.study.answer, sid, body.card_id, body.rating, body.duration_ms)
+
+    @app.delete("/api/sessions/{sid}", status_code=204)
+    def delete_session(sid: int):
+        guarded(lib.study.delete_session, sid)
 
     @app.get("/")
     def index():

@@ -41,6 +41,19 @@
   .meta { font-size: 12px; color: var(--muted); margin-top: 6px; display: flex; gap: 10px; flex-wrap: wrap; }
   .tag { background: var(--accent-soft); border-radius: 4px; padding: 0 6px; }
   .err { color: var(--bad); }
+  .toggle { display: inline-flex; gap: 6px; align-items: center; font-size: 13px; cursor: pointer; }
+  input[type=number] { width: 64px; padding: 9px 8px; font-size: 14px; border: 1px solid var(--line);
+         border-radius: 8px; background: var(--bg); color: var(--text); }
+  .grow { flex: 1; min-width: 0; }
+  .study-q { font-size: 20px; font-weight: 600; white-space: pre-wrap; margin: 18px 0 6px; }
+  .study-a { font-size: 17px; white-space: pre-wrap; margin: 10px 0 14px; padding-top: 10px; border-top: 1px solid var(--line); }
+  .grades { display: flex; gap: 8px; flex-wrap: wrap; }
+  .grades button { min-width: 84px; }
+  .grades button kbd { opacity: .55; font: inherit; font-size: 11px; margin-left: 4px; }
+  .g1 { border-color: var(--bad); } .g2 { border-color: var(--warn); } .g3 { border-color: var(--ok); } .g4 { border-color: var(--accent); }
+  .session { display: flex; gap: 10px; align-items: center; padding: 6px 0; border-top: 1px solid var(--line); }
+  .session:first-child { border-top: 0; }
+  .session .grow { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>
 </head>
 <body>
@@ -52,6 +65,9 @@
       <button class="primary" id="importBtn">Import .apkg</button>
       <input type="file" id="file" accept=".apkg" hidden multiple>
       <span class="muted" id="status">Loading…</span>
+      <label class="toggle" title="Schedule reviews with FSRS. Off = plain quiz, nothing is scheduled.">
+        <input type="checkbox" id="fsrs"> Spaced repetition (FSRS)
+      </label>
     </div>
     <div class="bar" id="barWrap" hidden><i id="bar"></i></div>
     <div class="muted err" id="error" hidden></div>
@@ -67,7 +83,38 @@
       </select>
       <button class="primary" type="submit">Search</button>
     </form>
+    <div class="row" style="margin-top:10px">
+      <button id="quizBtn" title="Build a study session from the query above (or from the selected decks if it is empty)">Quiz me</button>
+      <label class="muted">cards <input type="number" id="size" value="20" min="1" max="100"></label>
+      <label class="toggle muted" id="dueWrap" hidden><input type="checkbox" id="dueOnly"> due &amp; new only</label>
+      <span class="muted err" id="quizError"></span>
+    </div>
     <div class="decks" id="decks"></div>
+  </div>
+
+  <div class="panel" id="study" hidden>
+    <div class="row">
+      <strong id="studyTitle" class="grow"></strong>
+      <span class="muted" id="studyProgress"></span>
+      <button id="endBtn">Close</button>
+    </div>
+    <div class="study-q" id="studyQ"></div>
+    <div class="muted" id="studySched"></div>
+    <div id="studyReveal" style="margin-top:12px">
+      <button class="primary" id="showBtn">Show answer</button> <span class="muted">or press space</span>
+    </div>
+    <div id="studyAnswer" hidden>
+      <div class="study-a" id="studyA"></div>
+      <div class="grades" id="grades"></div>
+    </div>
+    <div id="studyDone" hidden>
+      <div class="study-a" id="studySummary"></div>
+    </div>
+  </div>
+
+  <div class="panel" id="sessionsPanel" hidden>
+    <div class="muted" style="margin-bottom:4px">Unfinished sessions</div>
+    <div id="sessions"></div>
   </div>
 
   <div class="panel" id="resultsPanel" hidden>
@@ -78,7 +125,8 @@
 
 <script>
 const $ = id => document.getElementById(id);
-let busy = false, lastJobKey = '';
+let busy = false, lastJobKey = '', fsrsOn = true, sess = null, statusTimer = null;
+const JSON_HEADERS = { 'Content-Type': 'application/json' };
 
 async function api(path, opts) {
   const r = await fetch(path, opts);
@@ -94,6 +142,7 @@ function el(tag, cls, text) {
 }
 
 async function refreshStatus() {
+  clearTimeout(statusTimer);  // callers refresh on demand; keep a single polling loop
   try {
     const s = await api('/api/status');
     const j = s.job, parts = [`${s.cards.toLocaleString()} cards in ${s.decks} deck${s.decks === 1 ? '' : 's'}`];
@@ -104,6 +153,11 @@ async function refreshStatus() {
       parts.push(`embedding ${s.embedded.toLocaleString()} / ${s.cards.toLocaleString()} (keyword search already works)`);
     } else if (s.pending > 0) parts.push(`${s.pending.toLocaleString()} cards not yet embedded`);
     else if (s.cards) parts.push('all embedded');
+    fsrsOn = s.fsrs;
+    if (s.fsrs && s.cards) parts.push(`${s.due.toLocaleString()} due · ${s.new.toLocaleString()} new`);
+    if (j.import && j.import.done && j.import.reviews) parts.push(`${j.import.reviews.toLocaleString()} reviews imported`);
+    $('fsrs').checked = s.fsrs;
+    $('dueWrap').hidden = !s.fsrs;
     $('status').textContent = parts.join(' · ');
     $('barWrap').hidden = pct === null;
     if (pct !== null) $('bar').style.width = pct + '%';
@@ -111,10 +165,10 @@ async function refreshStatus() {
     $('error').textContent = j.error || '';
     const key = s.cards + ':' + s.decks;
     if (key !== lastJobKey) { lastJobKey = key; refreshDecks(); }
-    setTimeout(refreshStatus, ['importing', 'embedding', 'queued'].includes(j.phase) ? 1000 : 4000);
+    statusTimer = setTimeout(refreshStatus, ['importing', 'embedding', 'queued'].includes(j.phase) ? 1000 : 4000);
   } catch (e) {
     $('status').textContent = 'Server unreachable';
-    setTimeout(refreshStatus, 4000);
+    statusTimer = setTimeout(refreshStatus, 4000);
   }
 }
 
@@ -178,7 +232,118 @@ function render(r) {
   }
 }
 
+$('fsrs').onchange = async e => {
+  try {
+    await api('/api/settings', { method: 'PUT', headers: JSON_HEADERS, body: JSON.stringify({ fsrs: e.target.checked }) });
+  } catch (err) { $('error').hidden = false; $('error').textContent = err.message; }
+  await refreshStatus();
+  if (sess) nextCard();  // the card shown now carries (or drops) its schedule
+};
+
+// ---- study sessions -------------------------------------------------------------------
+$('quizBtn').onclick = async () => {
+  $('quizError').textContent = '';
+  const decks = [...document.querySelectorAll('#decks input:checked')].map(i => +i.value);
+  const body = {
+    query: $('q').value.trim() || null, mode: $('mode').value, decks: decks.length ? decks : null,
+    size: Math.min(100, Math.max(1, +$('size').value || 20)),
+    scope: fsrsOn && $('dueOnly').checked ? 'due' : 'all',
+  };
+  try {
+    const s = await api('/api/sessions', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(body) });
+    await openSession(s.id);
+  } catch (err) { $('quizError').textContent = err.message; }
+};
+
+async function openSession(id) {
+  sess = { id, card: null, summary: null, shownAt: 0, revealed: false };
+  $('study').hidden = false;
+  $('study').scrollIntoView({ block: 'nearest' });
+  await nextCard();
+  refreshSessions();
+}
+
+async function nextCard() {
+  const r = await api(`/api/sessions/${sess.id}/next`);
+  sess.card = r.card; sess.summary = r.session; sess.revealed = false; sess.shownAt = Date.now();
+  renderCard();
+}
+
+function renderCard() {
+  const { card, summary } = sess;
+  $('studyTitle').textContent = summary.title;
+  $('studyProgress').textContent = `${summary.answered} answered · ${summary.remaining} to go`;
+  $('studyReveal').hidden = !card || sess.revealed;
+  $('studyAnswer').hidden = !card || !sess.revealed;
+  $('studyDone').hidden = !!card;
+  $('studyQ').textContent = card ? card.question : '';
+  $('studySched').textContent = '';
+  if (card) {
+    $('studyA').textContent = card.answer;
+    const sc = card.schedule;
+    $('studySched').textContent = [card.deck, sc && (sc.state === 'new' ? 'new card' :
+      `${sc.state} · recall ${(sc.retrievability * 100).toFixed(0)}%`)].filter(Boolean).join(' · ');
+    const grades = fsrsOn ? [[1, 'Again'], [2, 'Hard'], [3, 'Good'], [4, 'Easy']] : [[1, 'Missed'], [3, 'Got it']];
+    $('grades').replaceChildren(...grades.map(([rating, label], i) => {
+      const b = el('button', 'g' + rating, label);
+      b.append(el('kbd', '', String(i + 1)));
+      b.onclick = () => grade(rating);
+      return b;
+    }));
+  } else {
+    const rate = summary.recall_rate === null ? '' : ` Recalled ${(summary.recall_rate * 100).toFixed(0)}% of answers.`;
+    $('studySummary').textContent = `Session finished: ${summary.answered} answers.${rate}`;
+  }
+}
+
+function reveal() {
+  if (!sess || !sess.card || sess.revealed) return;
+  sess.revealed = true;
+  renderCard();
+}
+
+async function grade(rating) {
+  if (!sess || !sess.card || !sess.revealed) return;
+  const body = { card_id: sess.card.id, rating, duration_ms: Date.now() - sess.shownAt };
+  sess.revealed = false;  // ignore double presses while the request is in flight
+  try {
+    await api(`/api/sessions/${sess.id}/answer`, { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(body) });
+    await nextCard();
+    refreshStatus();
+  } catch (err) { $('quizError').textContent = err.message; sess.revealed = true; }
+}
+
+$('showBtn').onclick = reveal;
+$('endBtn').onclick = () => { sess = null; $('study').hidden = true; refreshSessions(); };
+document.addEventListener('keydown', e => {
+  if (!sess || e.target.closest('input, select, textarea') || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.key === ' ' || e.key === 'Enter') {
+    if (e.target.closest('button')) return;  // a focused button handles its own activation
+    e.preventDefault(); reveal();
+  } else if (sess.revealed && sess.card && /^[1-4]$/.test(e.key)) {
+    const rating = (fsrsOn ? [1, 2, 3, 4] : [1, 3])[+e.key - 1];
+    if (rating) grade(rating);
+  }
+});
+
+async function refreshSessions() {
+  try {
+    const open = (await api('/api/sessions')).filter(s => s.remaining > 0 && !(sess && sess.id === s.id));
+    $('sessionsPanel').hidden = open.length === 0;
+    $('sessions').replaceChildren(...open.map(s => {
+      const row = el('div', 'session');
+      row.append(el('span', 'grow', s.title), el('span', 'muted', `${s.remaining} left`));
+      const resume = el('button', '', 'Resume'); resume.onclick = () => openSession(s.id);
+      const drop = el('button', '', 'Discard');
+      drop.onclick = async () => { await api(`/api/sessions/${s.id}`, { method: 'DELETE' }); refreshSessions(); };
+      row.append(resume, drop);
+      return row;
+    }));
+  } catch (e) { /* the status line already reports an unreachable server */ }
+}
+
 refreshStatus();
+refreshSessions();
 </script>
 </body>
 </html>

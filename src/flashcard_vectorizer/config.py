@@ -32,11 +32,16 @@ class Config:
     embed_threads: int = 0
     # In-memory dtype of the vector matrix: float32 is fastest, float16 halves RAM.
     index_dtype: str = "float32"
+    # Spaced repetition. `fsrs` is the default for the in-app toggle (the toggle, once used, wins).
+    fsrs: bool = True
+    desired_retention: float = 0.9
     host: str = "127.0.0.1"
     port: int = 8765
 
     def __post_init__(self):
         self.data_dir = Path(self.data_dir) if self.data_dir else default_data_dir()
+        if not 0.7 <= self.desired_retention <= 0.99:
+            raise ValueError(f"desired_retention must be between 0.7 and 0.99, got {self.desired_retention}")
 
     @property
     def db_path(self) -> Path:

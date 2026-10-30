@@ -56,8 +56,16 @@ def generate_cards(n: int, decks: int = 20, seed: int = 0, vocab: list[str] | No
         )
 
 
-def build_apkg(path: str | Path, cards: list[tuple[str, str, str]], guid_prefix: str = "n") -> Path:
-    """Write a legacy-format ``.apkg`` of Basic cards from ``(deck, front, back)`` triples."""
+def build_apkg(
+    path: str | Path,
+    cards: list[tuple[str, str, str]],
+    guid_prefix: str = "n",
+    reviews: dict[int, list[tuple[int, int, int, int]]] | None = None,
+) -> Path:
+    """Write a legacy-format ``.apkg`` of Basic cards from ``(deck, front, back)`` triples.
+
+    ``reviews`` maps a card's index in ``cards`` to Anki revlog rows ``(ts_ms, ease, time_ms, type)``.
+    """
     path = Path(path)
     with tempfile.TemporaryDirectory() as tmp:
         dbfile = Path(tmp) / "collection.anki2"
@@ -93,6 +101,9 @@ def build_apkg(path: str | Path, cards: list[tuple[str, str, str]], guid_prefix:
             db.execute("INSERT INTO notes VALUES (?,?,1,0,0,'',?,?,0,0,'')",
                        (i, f"{guid_prefix}{i}", f"{front}\x1f{back}", front))
             db.execute("INSERT INTO cards VALUES (?,?,?,0,0,0,0,0,0,0,0,0,0,0,0,0,0,'')", (i, i, deck_ids[deck]))
+        for index, rows in (reviews or {}).items():
+            for ts, ease, ms, kind in rows:
+                db.execute("INSERT INTO revlog VALUES (?,?,0,?,0,0,2500,?,?)", (ts, index + 1, ease, ms, kind))
         db.commit()
         db.close()
         with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:

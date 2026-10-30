@@ -26,6 +26,7 @@ from .search import (
     load_index,
     rrf,
 )
+from .study import StudyService
 
 EMBED_CHUNK = 256  # cards per committed batch; also the granularity of resuming
 
@@ -50,6 +51,7 @@ class Library:
         self._index: BruteForceIndex | None = None
         self.index_lock = threading.RLock()  # serialises "commit vectors + update index" vs loading
         self.jobs = JobManager(self)
+        self.study = StudyService(self)
 
     # -- plumbing --------------------------------------------------------------------------
     def conn(self) -> sqlite3.Connection:
@@ -89,7 +91,15 @@ class Library:
             "SELECT count(*) FROM cards WHERE embedded_hash = content_hash AND embedded_model = ?",
             (self.model_id,),
         ).fetchone()[0]
+        fsrs = self.study.fsrs_enabled()
+        due = new = None  # only meaningful with FSRS on
+        if fsrs:
+            due = c.execute("SELECT count(*) FROM fsrs_state WHERE due <= ?", (int(time.time() * 1000),)).fetchone()[0]
+            new = cards - c.execute("SELECT count(*) FROM fsrs_state").fetchone()[0]
         return {
+            "fsrs": fsrs,
+            "due": due,  # reviewed cards whose next review is due
+            "new": new,  # never-reviewed cards
             "cards": cards,
             "decks": c.execute("SELECT count(*) FROM decks").fetchone()[0],
             "embedded": embedded,
@@ -313,7 +323,10 @@ class JobManager:
         self._set(phase="importing", error=None, **{"import": {"file": name, "cards": 0}})
         try:
             result: ImportResult = import_apkg(
-                self.lib.conn(), path, lambda n: self._set(**{"import": {"file": name, "cards": n}})
+                self.lib.conn(),
+                path,
+                lambda n: self._set(**{"import": {"file": name, "cards": n}}),
+                self.lib.cfg.desired_retention,
             )
         finally:
             if delete_after:
@@ -326,6 +339,7 @@ class JobManager:
                     "added": result.added,
                     "updated": result.updated,
                     "unchanged": result.unchanged + result.refreshed,
+                    "reviews": result.reviews,
                     "decks": sorted(result.decks),
                     "done": True,
                 }

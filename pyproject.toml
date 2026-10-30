@@ -17,6 +17,7 @@ dependencies = [
     "uvicorn>=0.29",
     "python-multipart>=0.0.9",
     "zstandard>=0.22",
+    "fsrs>=6",
 ]
 
 [project.optional-dependencies]

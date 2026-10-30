@@ -17,7 +17,7 @@ import tempfile
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, NamedTuple
 
 import zstandard
 
@@ -26,6 +26,12 @@ from .cleaning import cloze_numbers, media_refs, render_cloze, strip_html
 
 class ApkgError(Exception):
     pass
+
+
+class Review(NamedTuple):
+    ts: int  # ms since the epoch (Anki's revlog id)
+    rating: int  # 1 again .. 4 easy
+    duration_ms: int
 
 
 @dataclass
@@ -40,6 +46,7 @@ class ParsedCard:
     answer: str
     tags: str
     media: list[str] = field(default_factory=list)
+    reviews: list[Review] = field(default_factory=list)
 
 
 @dataclass
@@ -223,16 +230,37 @@ def iter_apkg(path: str | Path) -> Iterator[ParsedCard]:
                         "this package only contains Anki's compatibility placeholder; "
                         "re-export it from Anki (a current .apkg, or with 'support older Anki versions')"
                     )
+            has_revlog = _prepare_revlog(db)
             rows = db.execute(
-                "SELECT c.ord, c.did, c.odid, n.guid, n.mid, n.flds, n.tags "
+                "SELECT c.id, c.ord, c.did, c.odid, n.guid, n.mid, n.flds, n.tags "
                 "FROM cards c JOIN notes n ON n.id = c.nid ORDER BY c.id"
             )
-            for ord_, did, odid, guid, mid, flds, tags in rows:
+            for cid, ord_, did, odid, guid, mid, flds, tags in rows:
                 card = _build_card(notetypes.get(mid), decks.get(odid or did, "Default"), guid, ord_, flds, tags)
                 if card:
+                    if has_revlog:
+                        card.reviews = _reviews(db, cid)
                     yield card
         finally:
             db.close()
+
+
+def _prepare_revlog(db: sqlite3.Connection) -> bool:
+    """Index the revlog by card (our private temp copy of the collection) so per-card lookups are cheap."""
+    if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='revlog'").fetchone():
+        return False
+    db.execute("CREATE INDEX IF NOT EXISTS fv_revlog_cid ON revlog(cid)")
+    return True
+
+
+def _reviews(db: sqlite3.Connection, cid: int) -> list[Review]:
+    """Real answers only: types 0-2 are learn/review/relearn. Type 3 is cram/preview in a filtered deck
+    (does not change memory), 4-5 are manual reschedules; ease 0 marks those too."""
+    rows = db.execute(
+        "SELECT id, ease, time FROM revlog WHERE cid=? AND type IN (0,1,2) AND ease BETWEEN 1 AND 4 ORDER BY id",
+        (cid,),
+    )
+    return [Review(ts, ease, min(max(ms or 0, 0), 600_000)) for ts, ease, ms in rows]
 
 
 def _build_card(nt: _Notetype | None, deck: str, guid: str, ord_: int, flds: str, tags: str) -> ParsedCard | None:

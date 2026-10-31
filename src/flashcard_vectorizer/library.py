@@ -15,6 +15,7 @@ from .cleaning import card_text
 from .config import Config
 from .db import connect, init_db
 from .embedder import HASH_MODEL, MODELS, ModelSpec, load_embedder
+from .graph import GraphService
 from .importer import ImportResult, import_apkg
 from .search import (
     CANDIDATES,
@@ -52,6 +53,7 @@ class Library:
         self.index_lock = threading.RLock()  # serialises "commit vectors + update index" vs loading
         self.jobs = JobManager(self)
         self.study = StudyService(self)
+        self.graph = GraphService(self)
 
     # -- plumbing --------------------------------------------------------------------------
     def conn(self) -> sqlite3.Connection:
@@ -106,6 +108,7 @@ class Library:
             "pending": cards - embedded,
             "model": self.model_id,
             "index_rows": len(self._index) if self._index is not None else 0,
+            "graph": self.graph.status(),
             "job": self.jobs.state(),
         }
 
@@ -250,8 +253,9 @@ class JobManager:
         self._q: queue.Queue = queue.Queue()
         self._stop = threading.Event()
         self._lock = threading.Lock()
-        self._state: dict = {"phase": "idle", "import": None, "embed": None, "error": None}
+        self._state: dict = {"phase": "idle", "import": None, "embed": None, "graph": None, "error": None}
         self._embed_queued = False
+        self._graph_queued = False
         self._thread: threading.Thread | None = None
 
     def state(self) -> dict:
@@ -280,6 +284,14 @@ class JobManager:
             self._embed_queued = True
         self._ensure_thread()
         self._q.put(("embed",))
+
+    def submit_graph(self) -> None:
+        with self._lock:
+            if self._graph_queued:
+                return
+            self._graph_queued = True
+        self._ensure_thread()
+        self._q.put(("graph",))
 
     def wait(self, timeout: float | None = None) -> bool:
         """Block until the queue drains (used by the CLI and tests)."""
@@ -311,6 +323,10 @@ class JobManager:
                     with self._lock:
                         self._embed_queued = False
                     self._do_embed()
+                elif task[0] == "graph":
+                    with self._lock:
+                        self._graph_queued = False
+                    self._do_graph()
             except Exception as e:  # report to the UI instead of dying silently
                 self.lib.log(traceback.format_exc())
                 self._set(phase="error", error=f"{type(e).__name__}: {e}")
@@ -354,3 +370,15 @@ class JobManager:
             progress=lambda d, t: self._set(embed={"done": d, "total": t}),
         )
         self._set(embed={"done": 0, "total": 0})
+        if not self._stop.is_set():
+            self.submit_graph()
+
+    def _do_graph(self) -> None:
+        self._set(phase="graphing", error=None, graph={"stage": "neighbours", "done": 0, "total": 0})
+        try:
+            self.lib.graph.build(
+                should_stop=self._stop.is_set,
+                progress=lambda stage, d, t: self._set(graph={"stage": stage, "done": d, "total": t}),
+            )
+        finally:
+            self._set(graph=None)

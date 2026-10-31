@@ -5,3 +5,6 @@ dist/
 build/
 .pytest_cache/
 .fv_bench/
+frontend/node_modules/
+demo.apkg
+demo_data/

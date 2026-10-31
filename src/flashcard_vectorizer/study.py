@@ -7,6 +7,7 @@ but nothing is scheduled.
 from __future__ import annotations
 
 import json
+import random
 import time
 from typing import Sequence
 
@@ -56,15 +57,24 @@ class StudyService:
         size: int = 20,
         scope: str = "all",
         title: str | None = None,
+        cluster: int | None = None,
+        card_ids: Sequence[int] | None = None,
     ) -> dict:
         """Start a session from a query ("quiz me on X"), optionally scoped to decks.
 
         Without a query it quizzes the given decks (or the whole library). With FSRS on, queryless
         sessions are ordered most-overdue first, then new cards; with it off they are shuffled.
         ``scope='due'`` keeps only new cards and cards that are due.
+
+        Instead of a query, a session can be built from a knowledge-graph ``cluster`` (scoped to
+        ``decks`` if given) or from an explicit list of ``card_ids`` (e.g. a neighbourhood). Those
+        are ordered like a queryless session. At most one of query, cluster and card_ids may be set.
         """
         query = (query or "").strip()
         decks = list(decks) if decks else None
+        card_ids = list(dict.fromkeys(card_ids)) if card_ids else None
+        if sum(x is not None for x in (query or None, cluster, card_ids)) > 1:
+            raise ValueError("give at most one of query, cluster and cards")
         if scope not in SCOPES:
             raise ValueError(f"unknown scope {scope!r}; choose one of {list(SCOPES)}")
         if not 1 <= size <= MAX_SIZE:
@@ -80,6 +90,12 @@ class StudyService:
                 due = self._due_among(pool, now)
                 pool = [i for i in pool if i in due]
             ids = pool[:size]
+        elif cluster is not None:
+            ids = self._pick(self.lib.graph.cluster_card_ids(cluster, decks), size, scope == "due", fsrs, now)
+            title = title or f"Cluster: {self._cluster_label(cluster)}"
+        elif card_ids:
+            ids = self._pick(card_ids, size, scope == "due", fsrs, now)
+            title = title or "Selected cards"
         else:
             ids = self._deck_cards(decks, size, scope == "due", fsrs, now)
         if not ids:
@@ -109,6 +125,28 @@ class StudyService:
             [*ids, now],
         )
         return {r[0] for r in rows}
+
+    def _cluster_label(self, cluster: int) -> str:
+        row = self.conn().execute("SELECT label FROM graph_clusters WHERE id=?", (cluster,)).fetchone()
+        return row[0] if row else str(cluster)
+
+    def _pick(self, candidates: list[int], size: int, due_only: bool, fsrs: bool, now: int) -> list[int]:
+        """The first ``size`` of ``candidates`` in study order: overdue first with FSRS, else shuffled."""
+        found: list[tuple[int, int | None]] = []  # (card id, due)
+        for start in range(0, len(candidates), 500):
+            batch = candidates[start : start + 500]
+            sql = (
+                "SELECT c.id, s.due FROM cards c LEFT JOIN fsrs_state s ON s.card_id = c.id "
+                f"WHERE c.id IN ({','.join('?' * len(batch))})"
+            )
+            for cid, due in self.conn().execute(sql, batch):
+                if not due_only or due is None or due <= now:
+                    found.append((cid, due))
+        if fsrs:
+            found.sort(key=lambda r: (r[1] is None, r[1] or 0, r[0]))  # due cards by date, then new cards
+        else:
+            random.shuffle(found)
+        return [cid for cid, _ in found[:size]]
 
     def _deck_cards(self, decks, size: int, due_only: bool, fsrs: bool, now: int) -> list[int]:
         where, args = [], []

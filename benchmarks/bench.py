@@ -5,9 +5,13 @@
 What is measured for real, and what is not:
 
 * Import, FTS indexing, index load, memory and query latency run on a synthetic library of
-  ``--cards`` cards. For the 100k-card run the stored vectors are random unit vectors (embedding
-  100k cards for real takes tens of minutes); brute-force search cost depends only on matrix
-  shape, not on vector content. Query *embedding* uses the real model.
+  ``--cards`` cards. For the 100k-card run the stored vectors are stand-ins (embedding 100k cards
+  for real takes tens of minutes); brute-force search cost depends only on matrix shape, not on
+  vector content. Query *embedding* uses the real model. The stand-ins are not random noise: they
+  form topics inside broader super-topics, spread across decks, so the knowledge graph has real
+  neighbourhood structure to find (the text of the cards is unrelated to their vectors).
+* Graph: the full build (neighbours, clustering, layout) with its peak memory, the incremental
+  update when one more deck of ``--new-deck`` cards is added, and the latency of the graph endpoints.
 * Study: a fifth of the cards get synthetic review histories (``--reviews-per-card`` each), which
   are replayed through py-fsrs; then session building and answering are timed.
 * Embedding throughput is measured on a real sample (``--embed-sample`` cards, 3 texts each)
@@ -19,10 +23,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import statistics
 import sys
+import threading
 import time
 from pathlib import Path
+
+if "--cores" in sys.argv:
+    # Pinning to N CPUs does not shrink BLAS's thread pool (one thread per logical CPU), and a pool
+    # much larger than the CPUs it may run on collapses matrix-product speed. A real N-core machine
+    # starts N threads, so do the same here. Must happen before NumPy is imported.
+    _n = sys.argv[sys.argv.index("--cores") + 1]
+    if _n.isdigit() and int(_n) > 0:
+        os.environ.setdefault("OPENBLAS_NUM_THREADS", _n)
 
 import numpy as np
 import psutil
@@ -36,7 +50,7 @@ from flashcard_vectorizer.synthetic import generate_cards
 
 TARGET_CARDS = 100_000
 TARGETS = {"query_p95_ms": 1000, "query_ceiling_ms": 5000, "memory_mb": 800, "full_embed_min": 30,
-           "session_p95_ms": 1000}
+           "session_p95_ms": 1000, "graph_build_min": 10, "graph_update_s": 60, "graph_read_p95_ms": 1000}
 
 
 def rss_mb() -> float:
@@ -48,6 +62,48 @@ def real_vocab(model_root: Path) -> list[str]:
     with open(model_root / "tokenizer.json", encoding="utf-8") as f:
         vocab = json.load(f)["model"]["vocab"]
     return [t for t in vocab if t.isalpha() and t.isascii() and len(t) >= 3]
+
+
+class Topics:
+    """Stand-in vectors with structure: topics (cards ~0.7 similar) grouped into super-topics (~0.3)."""
+
+    def __init__(self, dim: int, topics: int = 400, supers: int = 40, seed: int = 0):
+        rng = np.random.default_rng(seed)
+        sup = self._unit(rng.normal(size=(supers, dim)))
+        noise = self._unit(rng.normal(size=(topics, dim)))
+        self.centres = self._unit(sup[rng.integers(0, supers, topics)] + 0.9 * noise)
+        self.dim = dim
+
+    @staticmethod
+    def _unit(m):
+        return m / np.linalg.norm(m, axis=-1, keepdims=True)
+
+    def sample(self, n: int, rng) -> np.ndarray:
+        """Unit vectors of shape (n, 3, dim): the combined vector, then question/answer variants of it."""
+        unit = self._unit
+        base = unit(self.centres[rng.integers(0, len(self.centres), n)] + 0.6 * unit(rng.normal(size=(n, self.dim))))
+        out = np.stack([base] + [unit(base + 0.3 * unit(rng.normal(size=(n, self.dim)))) for _ in range(2)], axis=1)
+        return out.astype(np.float32)
+
+
+class PeakRss:
+    """Samples the process's resident memory while a block runs."""
+
+    def __enter__(self):
+        self.peak = rss_mb()
+        self._stop = threading.Event()
+        self._t = threading.Thread(target=self._run, daemon=True)
+        self._t.start()
+        return self
+
+    def _run(self):
+        while not self._stop.wait(0.1):
+            self.peak = max(self.peak, rss_mb())
+
+    def __exit__(self, *exc):
+        self._stop.set()
+        self._t.join()
+        self.peak = max(self.peak, rss_mb())
 
 
 def pct(xs, p):
@@ -63,7 +119,11 @@ def main() -> int:
     ap.add_argument("--model", default="bge-small-en-v1.5")
     ap.add_argument("--reviews-per-card", type=int, default=8)
     ap.add_argument("--embed-sample", type=int, default=2000)
+    ap.add_argument("--new-deck", type=int, default=3000,
+                    help="size of the deck added to time the incremental graph update")
     ap.add_argument("--cores", type=int, default=0, help="pin to this many CPUs (0 = no pinning)")
+    ap.add_argument("--index-dtype", default="float32", choices=["float32", "float16"],
+                    help="in-memory dtype of the vector matrix (float16 halves its RAM)")
     ap.add_argument("--workdir", default=".fv_bench")
     ap.add_argument("--keep", action="store_true", help="reuse an existing workdir library if present")
     args = ap.parse_args()
@@ -80,7 +140,7 @@ def main() -> int:
                 shutil.rmtree(p) if p.is_dir() else p.unlink()
         db_exists = False
     cores = len(psutil.Process().cpu_affinity())
-    cfg = Config(data_dir=work, model=args.model, embed_threads=max(1, cores - 1))
+    cfg = Config(data_dir=work, model=args.model, embed_threads=max(1, cores - 1), index_dtype=args.index_dtype)
     cfg.data_dir.mkdir(parents=True, exist_ok=True)
     print(f"cores={cores} cards={args.cards} decks={args.decks} model={args.model} base_rss={rss_mb():.0f}MB\n")
 
@@ -88,6 +148,7 @@ def main() -> int:
     spec = lib.spec
     vocab = real_vocab(ensure_model_files(spec, cfg.models_dir))
     conn = lib.conn()
+    topics = Topics(spec.dim)
     report: dict[str, float] = {}
 
     # ---- import (parse results -> SQLite + FTS) -------------------------------------------
@@ -104,12 +165,10 @@ def main() -> int:
         ids = [r[0] for r in conn.execute("SELECT id FROM cards ORDER BY id")]
         for s in range(0, len(ids), 5000):
             chunk = ids[s : s + 5000]
-            v = rng.normal(size=(len(chunk) * 3, spec.dim)).astype(np.float32)
-            v /= np.linalg.norm(v, axis=1, keepdims=True)
-            v = v.astype(np.float16)
+            v = topics.sample(len(chunk), rng).astype(np.float16)
             conn.executemany(
                 "INSERT INTO vectors(card_id, kind, model, vec) VALUES (?,?,?,?)",
-                [(cid, k, lib.model_id, v[i * 3 + k].tobytes()) for i, cid in enumerate(chunk) for k in range(3)],
+                [(cid, k, lib.model_id, v[i, k].tobytes()) for i, cid in enumerate(chunk) for k in range(3)],
             )
         conn.execute("UPDATE cards SET embedded_hash = content_hash, embedded_model = ?", (lib.model_id,))
         conn.commit()
@@ -174,6 +233,78 @@ def main() -> int:
             report["query_p95_ms"] = pct(t, .95)
             report["query_max_ms"] = max(t)
 
+    # ---- knowledge graph --------------------------------------------------------------------------
+    print()
+    graph = lib.graph
+    with PeakRss() as peak:
+        t = time.perf_counter()
+        built = graph.build()
+        build_s = time.perf_counter() - t
+    report["graph_build_min"] = build_s / 60
+    report["graph_peak_mb"] = peak.peak
+    st = graph.status()
+    print(f"graph build:   {st['nodes']} cards -> {st['clusters']} clusters in {build_s:.1f}s "
+          f"(neighbours {built.get('neighbours_s', 0):.1f}s, clusters+layout {built.get('clusters_s', 0):.1f}s); "
+          f"peak RSS {peak.peak:.0f}MB (k={st['k']}, threshold {st['threshold']})")
+    sizes = sorted((r[0] for r in conn.execute("SELECT size FROM graph_clusters WHERE loose = 0")), reverse=True)
+    loose = conn.execute("SELECT coalesce(sum(size), 0) FROM graph_clusters WHERE loose = 1").fetchone()[0]
+    links = conn.execute("SELECT count(*) FROM knn").fetchone()[0]
+    print(f"               cluster sizes: largest {sizes[:5]}, median {statistics.median(sizes):.0f}, "
+          f"{loose} loose cards, {links} stored neighbour links")
+
+    # add one more deck and bring the graph up to date
+    new_cards = list(generate_cards(args.new_deck, 1, seed=777, vocab=vocab))
+    for c in new_cards:
+        c.deck = "Incremental deck"
+    before_ids = set(ids)
+    import_cards(conn, iter(new_cards))
+    new_ids = [r[0] for r in conn.execute("SELECT id FROM cards ORDER BY id") if r[0] not in before_ids]
+    v = topics.sample(len(new_ids), np.random.default_rng(5)).astype(np.float16)
+    conn.executemany(
+        "INSERT INTO vectors(card_id, kind, model, vec) VALUES (?,?,?,?)",
+        [(cid, k, lib.model_id, v[i, k].tobytes()) for i, cid in enumerate(new_ids) for k in range(3)],
+    )
+    conn.execute("UPDATE cards SET embedded_hash = content_hash, embedded_model = ? WHERE embedded_hash IS NULL",
+                 (lib.model_id,))
+    conn.commit()
+    deck_of = {r[0]: r[1] for r in conn.execute("SELECT id, deck_id FROM cards WHERE embedded_hash IS NOT NULL")}
+    index.add([cid for cid in new_ids for _ in range(3)], [deck_of[cid] for cid in new_ids for _ in range(3)],
+              [k for _ in new_ids for k in range(3)], v.reshape(-1, spec.dim).astype(index.dtype))
+    ids += new_ids
+    with PeakRss() as peak:
+        t = time.perf_counter()
+        graph.build()
+        upd_s = time.perf_counter() - t
+    report["graph_update_s"] = upd_s
+    report["graph_peak_mb"] = max(report["graph_peak_mb"], peak.peak)  # the update peaks higher than the first build
+    print(f"graph update:  +{len(new_ids)} cards in {upd_s:.1f}s (existing cards gain the new neighbours; "
+          f"peak RSS {peak.peak:.0f}MB)")
+
+    # reading the graph, as the UI does: overview, expand a cluster, neighbourhood
+    ov = graph.overview()
+    big = ov["clusters"][0]["id"]
+    rng = np.random.default_rng(3)
+    picks = [int(c) for c in rng.choice([c["id"] for c in ov["clusters"]], size=min(30, len(ov["clusters"])))]
+    probes = {
+        "overview": [lambda: graph.overview()],
+        "overview, deck filter": [lambda: graph.overview(decks[:2])],
+        "expand largest cluster": [lambda: graph.cluster(big)],
+        "expand random cluster": [lambda c=c: graph.cluster(c) for c in picks],
+        "neighbourhood, 2 hops": [lambda c=int(c): graph.neighbourhood([c], 2, 150) for c in rng.choice(ids, size=30)],
+    }
+    read_lat = []
+    for label, calls in probes.items():
+        lat, size = [], 0
+        for call in calls * (5 if len(calls) == 1 else 1):
+            t = time.perf_counter()
+            payload = call()
+            lat.append((time.perf_counter() - t) * 1000)
+            size = max(size, len(json.dumps(payload)))
+        read_lat += lat
+        print(f"graph read {label:24s} p50={pct(lat, .5):7.1f}ms p95={pct(lat, .95):7.1f}ms max={max(lat):7.1f}ms  "
+              f"(payload up to {size / 1e6:.2f} MB)")
+    report["graph_read_p95_ms"] = pct(read_lat, .95)
+
     # ---- study: FSRS seeding, sessions ----------------------------------------------------------
     print()
     if conn.execute("SELECT count(*) FROM reviews").fetchone()[0] == 0:
@@ -231,6 +362,12 @@ def main() -> int:
         (f"memory < {TARGETS['memory_mb']} MB", report["memory_mb"] < TARGETS["memory_mb"]),
         (f"full embed < {TARGETS['full_embed_min']} min", report["full_embed_min"] < TARGETS["full_embed_min"]),
         (f"session build p95 < {TARGETS['session_p95_ms']} ms", report["session_p95_ms"] < TARGETS["session_p95_ms"]),
+        (f"graph build < {TARGETS['graph_build_min']} min", report["graph_build_min"] < TARGETS["graph_build_min"]),
+        (f"graph build peak memory < {TARGETS['memory_mb']} MB", report["graph_peak_mb"] < TARGETS["memory_mb"]),
+        (f"graph update with a {args.new_deck}-card deck < {TARGETS['graph_update_s']} s",
+         report["graph_update_s"] < TARGETS["graph_update_s"]),
+        (f"graph read p95 < {TARGETS['graph_read_p95_ms']} ms",
+         report["graph_read_p95_ms"] < TARGETS["graph_read_p95_ms"]),
     ]
     for name, ok in checks:
         print(f"  [{'PASS' if ok else 'FAIL'}] {name}")

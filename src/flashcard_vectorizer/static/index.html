@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Flashcard Vectorizer</title>
+<link rel="icon" href="data:,">
 <style>
   :root {
     --bg: #fafaf8; --panel: #ffffff; --text: #1d1d1b; --muted: #6b6b66; --line: #e3e2dc;
@@ -58,7 +59,7 @@
 </head>
 <body>
 <main>
-  <h1>Flashcard Vectorizer</h1>
+  <h1>Flashcard Vectorizer <a href="/graph/" class="muted" style="font-weight:400;margin-left:10px" id="graphLink">Knowledge graph →</a></h1>
 
   <div class="panel">
     <div class="row">
@@ -151,8 +152,11 @@ async function refreshStatus() {
     else if (j.phase === 'embedding' || (s.pending > 0 && j.phase === 'queued')) {
       pct = s.cards ? (s.embedded / s.cards) * 100 : 0;
       parts.push(`embedding ${s.embedded.toLocaleString()} / ${s.cards.toLocaleString()} (keyword search already works)`);
+    } else if (j.phase === 'graphing') {
+      const g = j.graph;
+      parts.push(`building the knowledge graph${g && g.total ? ` (${g.stage} ${Math.round(g.done / g.total * 100)}%)` : ''}`);
     } else if (s.pending > 0) parts.push(`${s.pending.toLocaleString()} cards not yet embedded`);
-    else if (s.cards) parts.push('all embedded');
+    else if (s.cards) parts.push(s.graph.ready ? `all embedded · ${s.graph.clusters} clusters` : 'all embedded');
     fsrsOn = s.fsrs;
     if (s.fsrs && s.cards) parts.push(`${s.due.toLocaleString()} due · ${s.new.toLocaleString()} new`);
     if (j.import && j.import.done && j.import.reviews) parts.push(`${j.import.reviews.toLocaleString()} reviews imported`);
@@ -165,7 +169,7 @@ async function refreshStatus() {
     $('error').textContent = j.error || '';
     const key = s.cards + ':' + s.decks;
     if (key !== lastJobKey) { lastJobKey = key; refreshDecks(); }
-    statusTimer = setTimeout(refreshStatus, ['importing', 'embedding', 'queued'].includes(j.phase) ? 1000 : 4000);
+    statusTimer = setTimeout(refreshStatus, ['importing', 'embedding', 'graphing', 'queued'].includes(j.phase) ? 1000 : 4000);
   } catch (e) {
     $('status').textContent = 'Server unreachable';
     statusTimer = setTimeout(refreshStatus, 4000);
@@ -342,7 +346,13 @@ async function refreshSessions() {
   } catch (e) { /* the status line already reports an unreachable server */ }
 }
 
-refreshStatus();
+// The knowledge graph starts a session and sends us here as /#session=<id>.
+const jump = /^#session=(\d+)$/.exec(location.hash);
+const ready = refreshStatus();
+if (jump) {
+  history.replaceState(null, '', location.pathname);
+  ready.then(() => openSession(+jump[1])).catch(err => { $('quizError').textContent = err.message; });
+}
 refreshSessions();
 </script>
 </body>

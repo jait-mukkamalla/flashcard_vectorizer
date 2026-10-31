@@ -1,0 +1,67 @@
+/* Same look as the search page (static/index.html): the two pages share one design. */
+:root {
+  --bg: #fafaf8; --panel: #ffffff; --text: #1d1d1b; --muted: #6b6b66; --line: #e3e2dc;
+  --accent: #2d5be3; --accent-soft: #e8eefc; --ok: #1f8a4c; --warn: #b26a00; --bad: #c0392b;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #151514; --panel: #1e1e1c; --text: #ecebe6; --muted: #9a9992; --line: #33322e;
+    --accent: #7c9cff; --accent-soft: #242b45; --ok: #5cc98a; --warn: #e0a24a; --bad: #ee7b6e;
+  }
+}
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+a { color: var(--accent); }
+h2 { font-size: 18px; margin: 0 0 6px; }
+h3 { font-size: 13px; margin: 18px 0 6px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+.muted { color: var(--muted); font-size: 13px; }
+.err { color: var(--bad); }
+button, select, input[type=search], input[type=number] {
+  font: inherit; font-size: 14px; padding: 7px 11px; border-radius: 8px; border: 1px solid var(--line);
+  background: var(--panel); color: var(--text);
+}
+button { cursor: pointer; }
+button:disabled { opacity: .5; cursor: default; }
+button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+input[type=number] { width: 64px; padding: 7px 8px; }
+
+.app { display: flex; flex-direction: column; height: 100%; }
+.bar { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
+.bar .back { text-decoration: none; font-size: 14px; }
+.search { display: flex; gap: 6px; flex: 1 1 260px; min-width: 200px; }
+.search input { flex: 1; }
+.decks-bar { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; padding: 8px 16px; border-bottom: 1px solid var(--line); }
+.decks-bar label { display: inline-flex; gap: 6px; align-items: center; border: 1px solid var(--line); border-radius: 999px; padding: 1px 10px; font-size: 13px; cursor: pointer; }
+.decks-bar label.on { background: var(--accent-soft); border-color: var(--accent); }
+.decks-bar input { display: none; }
+.decks-bar button { padding: 2px 10px; font-size: 13px; border-radius: 999px; }
+.decks-bar i, .decks i, .meta i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; flex: none; }
+.banner { padding: 7px 16px; background: var(--accent-soft); font-size: 14px; }
+.banner.bad { background: transparent; color: var(--bad); border-bottom: 1px solid var(--bad); }
+
+.stage { flex: 1; display: flex; min-height: 0; }
+.view { position: relative; flex: 1; min-width: 0; }
+.canvas { position: absolute; inset: 0; background: var(--bg); }
+.side { width: 340px; flex: none; border-left: 1px solid var(--line); background: var(--panel); overflow-y: auto; }
+.side-body { padding: 16px; }
+.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 10px; }
+.quiz-size input { margin-left: 2px; }
+.legend { position: absolute; left: 12px; bottom: 10px; pointer-events: none; background: color-mix(in srgb, var(--bg) 80%, transparent); padding: 2px 8px; border-radius: 6px; }
+.empty { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 24px; gap: 4px; background: var(--bg); }
+.empty p { max-width: 420px; margin: 0 0 10px; }
+
+.decks { list-style: none; margin: 0; padding: 0; }
+.decks li { display: flex; gap: 8px; align-items: center; padding: 3px 0; }
+.grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.q { font-weight: 600; white-space: pre-wrap; }
+.a { white-space: pre-wrap; margin-top: 6px; color: var(--muted); }
+.meta { font-size: 12px; color: var(--muted); margin-top: 10px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.meta > span { display: inline-flex; gap: 5px; align-items: center; }
+.tag { background: var(--accent-soft); border-radius: 4px; padding: 0 6px; }
+
+@media (max-width: 800px) {
+  .stage { flex-direction: column; }
+  .view { flex: none; height: 60vh; }
+  .side { width: auto; border-left: 0; border-top: 1px solid var(--line); flex: 1; }
+}

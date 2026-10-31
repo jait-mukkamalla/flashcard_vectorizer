@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 
 from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .config import Config, load_config
@@ -25,6 +26,8 @@ class SessionRequest(BaseModel):
     size: int = Field(20, ge=1, le=100)
     scope: str = "all"
     title: str | None = None
+    cluster: int | None = None  # a knowledge-graph cluster, instead of a query
+    card_ids: list[int] | None = Field(None, max_length=1000)  # an explicit set of cards, e.g. a neighbourhood
 
 
 class AnswerRequest(BaseModel):
@@ -57,7 +60,9 @@ def create_app(cfg: Config | None = None, library: Library | None = None, warm: 
         if warm:
             threading.Thread(target=warm_up, name="fv-warmup", daemon=True).start()
             if lib.stats()["pending"]:
-                lib.jobs.submit_embed()  # resume an interrupted embedding run
+                lib.jobs.submit_embed()  # resume an interrupted embedding run (the graph follows it)
+            elif lib.graph.needs_build():
+                lib.jobs.submit_graph()  # resume an interrupted graph build
         yield
         lib.close()
 
@@ -164,8 +169,44 @@ def create_app(cfg: Config | None = None, library: Library | None = None, warm: 
     def delete_session(sid: int):
         guarded(lib.study.delete_session, sid)
 
+    # Knowledge graph. The overview shows clusters as super-nodes; a cluster's cards are fetched when
+    # it is expanded; a neighbourhood is the 1-2 hop surroundings of cards or of a query's top hits.
+    @app.get("/api/graph/overview")
+    def graph_overview(deck: Annotated[list[int] | None, Query()] = None):
+        return lib.graph.overview(deck)
+
+    @app.get("/api/graph/clusters/{cluster_id}")
+    def graph_cluster(cluster_id: int, deck: Annotated[list[int] | None, Query()] = None):
+        return guarded(lib.graph.cluster, cluster_id, deck)
+
+    @app.get("/api/graph/neighborhood")
+    def graph_neighborhood(
+        card: Annotated[list[int] | None, Query()] = None,
+        q: str | None = None,
+        seeds: Annotated[int, Query(ge=1, le=20)] = 5,
+        hops: Annotated[int, Query(ge=1, le=2)] = 1,
+        limit: Annotated[int, Query(ge=5, le=500)] = 150,
+        deck: Annotated[list[int] | None, Query()] = None,
+    ):
+        if (card is None) == (not q or not q.strip()):
+            raise HTTPException(400, "give either card=... or q=...")
+        if q and q.strip():
+            card = [r["id"] for r in lib.search(q.strip(), "hybrid", deck, seeds)["results"]]
+            if not card:
+                raise HTTPException(404, "no cards matched")
+        return guarded(lib.graph.neighbourhood, card, hops, limit, deck)
+
+    @app.post("/api/graph/rebuild", status_code=202)
+    def graph_rebuild():
+        lib.graph.reset()
+        lib.jobs.submit_graph()
+        return {"queued": True}
+
     @app.get("/")
     def index():
         return FileResponse(STATIC / "index.html")
+
+    if (STATIC / "graph" / "index.html").is_file():  # the prebuilt frontend (see frontend/)
+        app.mount("/graph", StaticFiles(directory=STATIC / "graph", html=True), name="graph")
 
     return app

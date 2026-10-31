@@ -1,3 +1,5 @@
+import re
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -54,6 +56,18 @@ def test_rejects_non_apkg_and_bad_params(client):
 def test_serves_ui(client):
     r = client.get("/")
     assert r.status_code == 200 and "Flashcard Vectorizer" in r.text
+
+
+def test_serves_the_prebuilt_graph_frontend(client):
+    # frontend/ is built into the package (npm run build), so users never need Node
+    page = client.get("/graph/")
+    assert page.status_code == 200 and '<div id="root">' in page.text
+    assets = re.findall(r'(?:src|href)="(/graph/assets/[^"]+)"', page.text)
+    assert any(a.endswith(".js") for a in assets) and any(a.endswith(".css") for a in assets)
+    for a in assets:
+        assert client.get(a).status_code == 200
+    # the page links back to the graph, and the graph page to the study page
+    assert "/graph/" in client.get("/").text
 
 
 def test_study_session_flow(client, lib, tmp_path):

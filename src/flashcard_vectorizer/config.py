@@ -35,6 +35,16 @@ class Config:
     # Spaced repetition. `fsrs` is the default for the in-app toggle (the toggle, once used, wins).
     fsrs: bool = True
     desired_retention: float = 0.9
+    # Knowledge graph: each card links to its `graph_k` nearest neighbours whose cosine similarity is at
+    # least `graph_threshold` (None = a default suited to the embedding model). `graph_resolution`
+    # steers community detection: higher gives more, smaller clusters.
+    graph_k: int = 8
+    graph_threshold: float | None = None
+    graph_resolution: float = 1.0
+    # BLAS threads used while building the graph. One thread is deliberate: it reaches ~60 GFLOPS
+    # reliably, while multi-threaded BLAS gains at most ~1.5x and, when cores are shared or limited,
+    # can run 5-10x slower than a single thread. It also leaves the other cores to the web UI.
+    graph_threads: int = 1
     host: str = "127.0.0.1"
     port: int = 8765
 
@@ -42,6 +52,14 @@ class Config:
         self.data_dir = Path(self.data_dir) if self.data_dir else default_data_dir()
         if not 0.7 <= self.desired_retention <= 0.99:
             raise ValueError(f"desired_retention must be between 0.7 and 0.99, got {self.desired_retention}")
+        if not 1 <= self.graph_k <= 50:
+            raise ValueError(f"graph_k must be between 1 and 50, got {self.graph_k}")
+        if self.graph_threshold is not None and not -1.0 <= self.graph_threshold <= 1.0:
+            raise ValueError(f"graph_threshold must be a cosine similarity in [-1, 1], got {self.graph_threshold}")
+        if self.graph_threads < 1:
+            raise ValueError(f"graph_threads must be at least 1, got {self.graph_threads}")
+        if self.graph_resolution <= 0:
+            raise ValueError(f"graph_resolution must be positive, got {self.graph_resolution}")
 
     @property
     def db_path(self) -> Path:

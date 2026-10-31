@@ -43,6 +43,7 @@ class BruteForceIndex:
         self._mat = np.empty((capacity, dim), dtype=self.dtype)
         self._cards = np.empty(capacity, dtype=np.int64)
         self._decks = np.empty(capacity, dtype=np.int64)
+        self._kinds = np.empty(capacity, dtype=np.int8)
         self._lock = threading.RLock()
 
     def __len__(self) -> int:
@@ -50,7 +51,7 @@ class BruteForceIndex:
 
     @property
     def nbytes(self) -> int:
-        return self._mat.nbytes + self._cards.nbytes + self._decks.nbytes
+        return self._mat.nbytes + self._cards.nbytes + self._decks.nbytes + self._kinds.nbytes
 
     def _reserve(self, extra: int) -> None:
         need = self._n + extra
@@ -62,13 +63,13 @@ class BruteForceIndex:
         mat = np.empty((cap, self.dim), dtype=self.dtype)
         mat[: self._n] = self._mat[: self._n]
         self._mat = mat
-        for name in ("_cards", "_decks"):
-            arr = np.empty(cap, dtype=np.int64)
-            arr[: self._n] = getattr(self, name)[: self._n]
+        for name in ("_cards", "_decks", "_kinds"):
+            old = getattr(self, name)
+            arr = np.empty(cap, dtype=old.dtype)
+            arr[: self._n] = old[: self._n]
             setattr(self, name, arr)
 
     def add(self, card_ids, deck_ids, kinds, vecs) -> None:
-        # `kinds` is accepted for the interface; scoring treats every row alike.
         n = len(card_ids)
         if n == 0:
             return
@@ -78,6 +79,7 @@ class BruteForceIndex:
             self._mat[s] = vecs
             self._cards[s] = card_ids
             self._decks[s] = deck_ids
+            self._kinds[s] = kinds
             self._n += n
 
     def remove(self, card_ids) -> None:
@@ -90,7 +92,20 @@ class BruteForceIndex:
             self._mat[:kept] = self._mat[: self._n][keep]
             self._cards[:kept] = self._cards[: self._n][keep]
             self._decks[:kept] = self._decks[: self._n][keep]
+            self._kinds[:kept] = self._kinds[: self._n][keep]
             self._n = kept
+
+    # -- row access for the knowledge graph (brute-force specific: an ANN index would build its own kNN) --
+    def kind_rows(self, kind: int) -> np.ndarray:
+        """Row numbers of every vector of one kind (e.g. KIND_COMBINED), in storage order."""
+        return np.flatnonzero(self._kinds[: self._n] == kind)
+
+    def card_of_rows(self, rows: np.ndarray) -> np.ndarray:
+        return self._cards[rows]
+
+    def rows_f32(self, rows: np.ndarray) -> np.ndarray:
+        """Copy of the given rows as float32, ready for a matrix product."""
+        return self._mat[rows].astype(np.float32, copy=False)
 
     def _scores(self, q: np.ndarray) -> np.ndarray:
         n = self._n

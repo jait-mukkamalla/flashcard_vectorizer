@@ -24,6 +24,9 @@ class ModelSpec:
     query_prefix: str
     # Bump when the files/preprocessing change so stored vectors get recomputed.
     version: str = "onnx-int8-1"
+    # Cosine similarity above which two cards count as related in the knowledge graph. Models
+    # differ: bge scores unrelated text around 0.4-0.5, MiniLM around 0.0-0.2.
+    graph_threshold: float = 0.6
 
     @property
     def model_id(self) -> str:
@@ -36,13 +39,14 @@ MODELS: dict[str, ModelSpec] = {
     s.name: s
     for s in (
         ModelSpec("bge-small-en-v1.5", "Xenova/bge-small-en-v1.5", "onnx/model_quantized.onnx", 384, "cls", _BGE_PREFIX),
-        ModelSpec("all-MiniLM-L6-v2", "Xenova/all-MiniLM-L6-v2", "onnx/model_quantized.onnx", 384, "mean", ""),
+        ModelSpec("all-MiniLM-L6-v2", "Xenova/all-MiniLM-L6-v2", "onnx/model_quantized.onnx", 384, "mean", "",
+                  graph_threshold=0.45),
         ModelSpec("bge-base-en-v1.5", "Xenova/bge-base-en-v1.5", "onnx/model_quantized.onnx", 768, "cls", _BGE_PREFIX),
     )
 }
 
 # Offline stand-in for tests and CI; not a real semantic model.
-HASH_MODEL = ModelSpec("hash-test", "", "", 256, "", "", version="1")
+HASH_MODEL = ModelSpec("hash-test", "", "", 256, "", "", version="1", graph_threshold=0.3)
 
 _TOKENIZER_FILE = "tokenizer.json"
 

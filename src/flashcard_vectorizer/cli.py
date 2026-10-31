@@ -1,4 +1,4 @@
-"""Command line entry point: ``flashcard-vectorizer serve | import | embed | search | status``."""
+"""Command line entry point: ``flashcard-vectorizer serve | import | embed | graph | search | status``."""
 from __future__ import annotations
 
 import argparse
@@ -53,11 +53,30 @@ def cmd_embed(lib: Library, args) -> int:
     pending = len(lib.pending_ids())
     if not pending:
         print("nothing to embed")
-        return 0
+        return cmd_graph(lib, args)
     t = time.perf_counter()
     lib.embed_pending(progress=_progress("embedding"))
     dt = time.perf_counter() - t
     print(f"\nembedded {pending} cards in {dt:.1f}s ({pending / dt:.0f} cards/s)")
+    return cmd_graph(lib, args)
+
+
+def cmd_graph(lib: Library, args) -> int:
+    """Bring the knowledge graph up to date (incremental: only new or changed cards are searched)."""
+    if getattr(args, "rebuild", False):
+        lib.graph.reset()
+    if not lib.graph.needs_build():
+        print("knowledge graph is up to date")
+        return 0
+    stages = {"neighbours": "finding neighbours", "clustering": "clustering", "layout": "laying out"}
+    bars = {name: _progress(label) for name, label in stages.items()}
+
+    t = time.perf_counter()
+    result = lib.graph.build(progress=lambda stage, done, total: bars[stage](done, total))
+    print(
+        f"\nknowledge graph: {result['nodes']} cards in {result['clusters']} clusters "
+        f"({time.perf_counter() - t:.1f}s; similarity >= {result['threshold']}, k={result['k']})"
+    )
     return 0
 
 
@@ -72,6 +91,8 @@ def cmd_search(lib: Library, args) -> int:
 def cmd_status(lib: Library, args) -> int:
     s = lib.stats()
     print(f"{s['cards']} cards, {s['decks']} decks, {s['embedded']} embedded ({s['pending']} pending), model {s['model']}")
+    g = s["graph"]
+    print(f"knowledge graph: {g['clusters']} clusters over {g['nodes']} cards" if g["ready"] else "knowledge graph: not built")
     return 0
 
 
@@ -90,7 +111,13 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--no-embed", action="store_true", help="import only; keyword search works immediately")
     s.set_defaults(fn=cmd_import)
 
-    sub.add_parser("embed", help="embed cards that have no (current) vectors").set_defaults(fn=cmd_embed)
+    sub.add_parser("embed", help="embed cards that have no (current) vectors, then update the graph").set_defaults(
+        fn=cmd_embed
+    )
+
+    s = sub.add_parser("graph", help="build or update the knowledge graph from the embedded cards")
+    s.add_argument("--rebuild", action="store_true", help="discard the graph and start from scratch")
+    s.set_defaults(fn=cmd_graph)
 
     s = sub.add_parser("search", help="search from the terminal")
     s.add_argument("query", nargs="+")

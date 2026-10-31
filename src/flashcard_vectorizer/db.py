@@ -88,6 +88,50 @@ CREATE TABLE IF NOT EXISTS session_cards (
     rating      INTEGER,               -- NULL until answered
     PRIMARY KEY (session_id, position)
 ) WITHOUT ROWID;
+
+-- Knowledge graph (see graph.py). knn holds each card's nearest neighbours by cosine similarity of
+-- its combined vector; the graph's edges are these pairs above a similarity threshold, undirected.
+CREATE TABLE IF NOT EXISTS knn (
+    src  INTEGER NOT NULL REFERENCES cards(id) ON DELETE CASCADE,
+    dst  INTEGER NOT NULL REFERENCES cards(id) ON DELETE CASCADE,
+    sim  REAL NOT NULL,
+    PRIMARY KEY (src, dst)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS knn_dst ON knn(dst);
+
+-- One row per card whose neighbour list is up to date. hash = the content hash it was computed for.
+-- cluster_id and x, y (position inside the cluster, unit disc) are filled in by clustering.
+CREATE TABLE IF NOT EXISTS graph_nodes (
+    card_id     INTEGER PRIMARY KEY REFERENCES cards(id) ON DELETE CASCADE,
+    hash        TEXT,
+    cluster_id  INTEGER,
+    x           REAL,
+    y           REAL
+);
+CREATE INDEX IF NOT EXISTS graph_nodes_cluster ON graph_nodes(cluster_id);
+
+CREATE TABLE IF NOT EXISTS graph_clusters (
+    id      INTEGER PRIMARY KEY,
+    size    INTEGER NOT NULL,
+    label   TEXT NOT NULL,
+    x       REAL NOT NULL,             -- centre and radius in world coordinates
+    y       REAL NOT NULL,
+    radius  REAL NOT NULL,
+    loose   INTEGER NOT NULL DEFAULT 0 -- 1 = the pool of cards that belong to no real cluster
+);
+CREATE TABLE IF NOT EXISTS graph_cluster_decks (
+    cluster_id  INTEGER NOT NULL REFERENCES graph_clusters(id) ON DELETE CASCADE,
+    deck_id     INTEGER NOT NULL REFERENCES decks(id) ON DELETE CASCADE,
+    n           INTEGER NOT NULL,
+    PRIMARY KEY (cluster_id, deck_id)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS graph_links (
+    a      INTEGER NOT NULL REFERENCES graph_clusters(id) ON DELETE CASCADE,
+    b      INTEGER NOT NULL REFERENCES graph_clusters(id) ON DELETE CASCADE,
+    edges  INTEGER NOT NULL,           -- card-level edges between the two clusters
+    weight REAL NOT NULL,              -- their summed similarity
+    PRIMARY KEY (a, b)
+) WITHOUT ROWID;
 """
 
 
